@@ -38,6 +38,7 @@ import {
 } from "#protocol/message.js";
 import {
   CallbackBaseUrlKey,
+  clearPendingAuthorization,
   getPendingAuthorization,
   PendingAuthorizationResultKey,
   type AuthorizationResult,
@@ -58,10 +59,10 @@ import { createExecutionNodeStep } from "#execution/node-step.js";
 import { emitProxiedInputRequest, routeDeliverPayload } from "#execution/subagent-hitl-proxy.js";
 import { hydrateDurableSession, refreshSessionFromTurnAgent } from "#execution/session.js";
 import { buildTurnAttributes, readRootSessionId } from "#execution/eve-workflow-attributes.js";
-import { setEveAttributes } from "#runtime/attributes/emit.js";
+import { normalizeEveAttributes } from "#runtime/attributes/normalize.js";
 import { turnWorkflow } from "#execution/turn-workflow.js";
 import { createWorkflowRuntime, startWorkflowPreferLatest } from "#execution/workflow-runtime.js";
-import type { RuntimeCompiledArtifactsSource } from "#runtime/compiled-artifacts-source.js";
+import { resumeHook } from "#internal/workflow/runtime.js";
 
 /**
  * Result of one durable harness step, consumed by the turn workflow.
@@ -105,32 +106,10 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
 
   let input = rawInput;
 
-  // Tag this turn run with the lineage attributes the dashboard uses to
-  // roll turns up under their parent session. Emitted from inside this
-  // step — which the turn workflow already pays for — so we never spend
-  // a standalone `__builtin_set_attributes` step in the workflow body.
-  // The values are constant for the run, so emitting on every step
-  // iteration is idempotent (last-write-wins) and avoids guessing which
-  // iteration is "first". Best effort — `setEveAttributes` swallows
-  // runtime failures.
-  await setEveAttributes(
-    buildTurnAttributes({
-      parentSessionId: input.sessionState.sessionId,
-      rootSessionId: readRootSessionId(input.serializedContext) ?? input.sessionState.sessionId,
-    }),
-  );
-
-  const durableSession = await readDurableSession(input.sessionState);
+  let durableSession = await readDurableSession(input.sessionState);
   const ctx = await deserializeContext(input.serializedContext);
   const adapter = ctx.require(ChannelKey);
   const bundle = ctx.require(BundleKey);
-  const initialSession = hydrateDurableSession({
-    compactionOverrides: {
-      thresholdPercent: bundle.resolvedAgent.config.compaction?.thresholdPercent,
-    },
-    durable: durableSession,
-    turnAgent: bundle.turnAgent,
-  });
 
   // Populate the callback base URL so getHookUrl() works during
   // tool execution. Reads from workflow metadata (available in steps).
@@ -180,6 +159,13 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
     }
     if (authResults.length > 0) {
       ctx.set(PendingAuthorizationResultKey, authResults);
+      durableSession = {
+        ...durableSession,
+        state: clearPendingAuthorization(
+          durableSession.state,
+          authResults.map((result) => result.name),
+        ),
+      };
       completedAuths = completed;
       input =
         remainingPayloads.length > 0
@@ -193,6 +179,14 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
   if (input.input?.kind === "deliver" && input.input.auth !== undefined) {
     ctx.set(AuthKey, input.input.auth ?? null);
   }
+
+  const initialSession = hydrateDurableSession({
+    compactionOverrides: {
+      thresholdPercent: bundle.resolvedAgent.config.compaction?.thresholdPercent,
+    },
+    durable: durableSession,
+    turnAgent: bundle.turnAgent,
+  });
 
   const adapterCtx = buildAdapterContext(adapter, ctx);
 
@@ -315,17 +309,19 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
         compactionOverrides: {
           thresholdPercent: bundle.resolvedAgent.config.compaction?.thresholdPercent,
         },
-        refreshSystemPrompt: shouldRefreshSystemPromptFromTurnAgent(bundle.compiledArtifactsSource),
         session: lifecycleSession,
         turnAgent: bundle.turnAgent,
       });
 
       const step = createExecutionNodeStep({
         capabilities,
-        compiledArtifactsSource: bundle.compiledArtifactsSource,
         createRuntime: createWorkflowRuntime,
         handleEvent,
         mode,
+        modelResolutionScope: {
+          moduleMap: bundle.moduleMap,
+          nodeId: bundle.nodeId,
+        },
         node: bundle.graph.root,
       });
       return step(refreshedSession, stepInput);
@@ -387,15 +383,6 @@ export async function turnStep(rawInput: TurnStepInput): Promise<DurableStepResu
     serializedContext: nextSerializedContext,
     sessionState: nextState,
   };
-}
-
-function shouldRefreshSystemPromptFromTurnAgent(
-  compiledArtifactsSource: RuntimeCompiledArtifactsSource,
-): boolean {
-  return (
-    compiledArtifactsSource.kind === "disk" &&
-    compiledArtifactsSource.moduleMapLoaderPath !== undefined
-  );
 }
 
 /**
@@ -633,9 +620,6 @@ export async function routeProxiedDeliverStep(input: {
     state: durableSession.state,
   });
 
-  const { resumeHook } = await import("#compiled/@workflow/core/runtime.js");
-  process.env.WORKFLOW_QUEUE_NAMESPACE = "eve";
-
   for (const forChild of routed.forChildren) {
     await resumeHook(forChild.childContinuationToken, {
       auth: input.auth,
@@ -653,7 +637,16 @@ export async function dispatchTurnStep(
 ): Promise<{ readonly runId: string }> {
   "use step";
 
-  const run = await startWorkflowPreferLatest(turnWorkflow, [createTurnWorkflowInput(input)]);
+  const run = await startWorkflowPreferLatest(turnWorkflow, [createTurnWorkflowInput(input)], {
+    allowReservedAttributes: true,
+    attributes: normalizeEveAttributes(
+      buildTurnAttributes({
+        parentSessionId: input.sessionState.sessionId,
+        requestId: input.delivery.kind === "deliver" ? input.delivery.requestId : undefined,
+        rootSessionId: readRootSessionId(input.serializedContext) ?? input.sessionState.sessionId,
+      }),
+    ),
+  });
 
   return { runId: run.runId };
 }

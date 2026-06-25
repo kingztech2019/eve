@@ -171,12 +171,18 @@ export interface SlackChannelState {
    */
   pendingToolCallMessage?: string | null;
   /**
+   * Last reasoning-derived typing indicator sent by the default
+   * `reasoning.appended` handler. Used to surface substantial progressive
+   * extensions immediately while throttling smaller streamed deltas.
+   */
+  lastReasoningTypingAtMs?: number | null;
+  lastReasoningTypingStatus?: string | null;
+  /**
    * Connection name to Slack message ts. Each entry is the public
-   * link-free fallback status post created by the default
-   * `authorization.required` handler when the challenge could not be
-   * delivered ephemerally; the matching `authorization.completed`
-   * handler edits it in place to surface the resolution outcome. The
-   * normal ephemeral path stores nothing here.
+   * link-free status post created by the default
+   * `authorization.required` handler; the matching
+   * `authorization.completed` handler edits it in place to surface the
+   * resolution outcome.
    */
   pendingAuthMessageTs?: Record<string, string>;
 }
@@ -318,6 +324,8 @@ export interface SlackChannelEvents {
   readonly "action.result"?: SlackEventHandler<"action.result">;
   readonly "message.completed"?: SlackEventHandler<"message.completed">;
   readonly "message.appended"?: SlackEventHandler<"message.appended">;
+  readonly "reasoning.appended"?: SlackEventHandler<"reasoning.appended">;
+  readonly "reasoning.completed"?: SlackEventHandler<"reasoning.completed">;
   readonly "input.requested"?: SlackEventHandler<"input.requested">;
   readonly "turn.failed"?: SlackEventHandler<"turn.failed">;
   readonly "turn.completed"?: SlackEventHandler<"turn.completed">;
@@ -338,8 +346,8 @@ export interface SlackChannelEvents {
  * Full-context variant of {@link SlackChannelEvents} consumed by the
  * channel internals. The framework's default `authorization.required`
  * handler keeps the full {@link SlackEventContext} because it owns the
- * public link-free fallback for sessions with no user to target
- * privately. The factory adapts user overrides into this shape with
+ * public link-free status while user overrides remain private-only. The
+ * factory adapts user overrides into this shape with
  * {@link constrainAuthorizationRequired}.
  */
 export interface SlackChannelInternalEvents extends Omit<
@@ -495,6 +503,8 @@ export function slackChannel(config: SlackChannelConfig = {}): SlackChannel {
       teamId: null as string | null,
       triggeringUserId: null,
       pendingToolCallMessage: null,
+      lastReasoningTypingAtMs: null,
+      lastReasoningTypingStatus: null,
       pendingAuthMessageTs: {},
     },
     fetchFile: slackFetchFile,
@@ -574,9 +584,13 @@ export function slackChannel(config: SlackChannelConfig = {}): SlackChannel {
         threadTs = posted.id;
       }
 
+      // Threadless proactive runs need distinct identities until their first
+      // Slack post supplies the real thread timestamp and re-keys the session.
+      const continuationThreadTs = threadTs || crypto.randomUUID();
+
       return send(input.message, {
         auth: input.auth,
-        continuationToken: slackContinuationToken(channelId, threadTs),
+        continuationToken: slackContinuationToken(channelId, continuationThreadTs),
         state: {
           channelId,
           threadTs: threadTs || null,
