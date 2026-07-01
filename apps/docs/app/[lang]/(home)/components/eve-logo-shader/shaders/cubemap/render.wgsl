@@ -1,8 +1,11 @@
 struct CubeParams {
   face: f32,
+  mode: f32,
   _pad0: f32,
   _pad1: f32,
-  _pad2: f32,
+  // Linear-space tints for the 6 studio spots. Populated from EVE_AGENT_BLUE
+  // and EVE_AGENT_SPOT_TINTS in render.ts during the one-time colored bake.
+  spotTints: array<vec4f, 6>,
 };
 
 struct VertexOutput {
@@ -64,6 +67,11 @@ fn spot(dir: vec3f, center: vec3f, radius: f32, softness: f32, luminance: f32) -
   return vec3f(1.0) * (t * luminance);
 }
 
+fn spot_tinted(index: u32, dir: vec3f, center: vec3f, radius: f32, softness: f32, luminance: f32) -> vec3f {
+  let tint = select(vec3f(1.0), params.spotTints[index].rgb, params.mode > 0.5);
+  return spot(dir, center, radius, softness, luminance) * tint;
+}
+
 @fragment
 fn fs_main(input: VertexOutput) -> @location(0) vec4f {
   let dir = cube_dir(params.face, input.uv);
@@ -71,15 +79,17 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
   // Dim black studio with high-dynamic-range white cards/softboxes.
   var radiance = vec3f(0.0);
 
+  // Spot index -> tint is controlled by EVE_AGENT_SPOT_TINTS in render.ts.
+  // Current design: all spots are shades of blue mixed toward white.
   // dir center radius softness luminance
-  radiance += spot(dir, vec3f(-1.4, 2., -0.4), 0.3, 0.02, 10.0); // top-left high
-  radiance += spot(dir, vec3f(-0.4, 1., 1.), 0.9, 0.02, 1.0); // front-left high
+  radiance += spot_tinted(0u, dir, vec3f(-1.4, 2., -0.4), 0.3, 0.02, 10.0); // top-left high
+  radiance += spot_tinted(1u, dir, vec3f(-0.4, 1., 1.), 0.9, 0.02, 1.0); // front-left high
 
-  radiance += spot(dir, vec3f(0.5, 0., 1.)*10., 0.5, 0.1, 0.2); // front-right
-  radiance += spot(dir, vec3f(0.4, -0.3, -1.), 0.1, 1., 0.5); // back-right
+  radiance += spot_tinted(2u, dir, vec3f(0.5, 0., 1.)*10., 0.5, 0.1, 0.2); // front-right
+  radiance += spot_tinted(3u, dir, vec3f(0.4, -0.3, -1.), 0.1, 1., 0.5); // back-right
 
-  radiance += spot(dir, vec3f(1.0, -2., -0.5), 0.2, 1., 5.); // front-bottom-right
-  radiance += spot(dir, vec3f(-0.3, -0.2, -0.2), 0.3, 4., 3.); // front-bottom-left
-  
+  radiance += spot_tinted(4u, dir, vec3f(1.0, -2., -0.5), 0.2, 1., 5.); // front-bottom-right
+  radiance += spot_tinted(5u, dir, vec3f(-0.3, -0.2, -0.2), 0.3, 4., 3.); // front-bottom-left
+
   return vec4f(radiance, 1.0);
 }

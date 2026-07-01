@@ -20,11 +20,13 @@ export fn beer_lambert_transmittance(absorption: vec3f, thickness: f32) -> vec3f
 
 export fn shade_glass(
   studioCube: texture_2d_array<f32>,
+  coloredStudioCube: texture_2d_array<f32>,
   studioSampler: sampler,
   n: vec3f,
   v: vec3f,
   reflected: vec3f,
   envYaw: f32,
+  envColorMix: f32,
   inside: bool,
 ) -> vec4f {
   let ndotv = clamp(dot(n, v), 0.0, 1.0);
@@ -35,7 +37,7 @@ export fn shade_glass(
   // angles. Lift the specular floor so the polished-acrylic reflection reads across the face,
   // while still ramping up toward grazing via Fresnel.
   let specularReflectance = clamp(REFLECTION_FLOOR + fresnel, vec3f(0.0), vec3f(1.0));
-  let clearcoatSample = env_reflection_from_dir(studioCube, studioSampler, reflected, envYaw);
+  let clearcoatSample = env_reflection_from_dir(studioCube, coloredStudioCube, studioSampler, reflected, envYaw, envColorMix);
   // Learning from the cube-camera mirror test: artificial >1.0 reflection boosts make the
   // reflection brighter than the environment actually is (exaggerated). Keep the clearcoat a
   // true 1:1 reflection weighted only by the (energy-conserving) specular reflectance.
@@ -47,7 +49,7 @@ export fn shade_glass(
   let fallbackDir = normalize(mix(v, reflected, 0.25));
   let refractValid = dot(refracted, refracted) > 0.0;
   let transmissionDir = normalize(select(fallbackDir, refracted, refractValid));
-  let baseSample = env_reflection_from_dir(studioCube, studioSampler, transmissionDir, envYaw);
+  let baseSample = env_reflection_from_dir(studioCube, coloredStudioCube, studioSampler, transmissionDir, envYaw, envColorMix);
 
   let baseThickness = select(0.22, 0.14, inside);
   let approxThickness = clamp(baseThickness / max(ndotv, 0.08), 0.05, 2.0);

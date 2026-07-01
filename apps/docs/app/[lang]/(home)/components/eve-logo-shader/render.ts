@@ -36,6 +36,7 @@ export type RenderControls = {
   material: EveMaterial;
   wireframe: boolean;
   showEnv: boolean;
+  envColorMix?: number;
 };
 
 type GpuMesh = {
@@ -54,7 +55,9 @@ export type StudioCubemap = {
 };
 
 const PARAMS_BYTE_SIZE = 144;
-const CUBE_PARAMS_BYTE_SIZE = 16;
+const CUBE_TINT_COUNT = 6;
+const CUBE_PARAMS_FLOAT_COUNT = 4 + CUBE_TINT_COUNT * 4;
+const CUBE_PARAMS_BYTE_SIZE = CUBE_PARAMS_FLOAT_COUNT * Float32Array.BYTES_PER_ELEMENT;
 export const CUBE_SIZE = 256;
 export const CUBE_FACE_COUNT = 6;
 export const CUBE_FORMAT: GPUTextureFormat = "rgba16float";
@@ -84,6 +87,24 @@ const EVE_THICKNESS_SCALE_MULTIPLIER = 1.3;
 const PREVIEW_BACK_ALBEDO = 0;
 const PREVIEW_BACK_DEPTH = 1;
 
+// Editable agent-mode environment-light knobs. Hex color is sRGB and is
+// converted to linear values before the one-time colored cubemap bake.
+export const EVE_AGENT_BLUE = "#266AE1" as const;
+export const EVE_AGENT_TINT_INTENSITY = 3;
+
+// Spot indices map to the comments in shaders/cubemap/render.wgsl. All spots
+// use the base blue mixed toward linear white by the editable `whiteMix` amount
+// (0 = full blue, 1 = white). Per-light `intensity` is applied after that mix,
+// then EVE_AGENT_TINT_INTENSITY is applied as a final global boost.
+export const EVE_AGENT_SPOT_TINTS = [
+  { whiteMix: 0.9, intensity: 1 }, // 0: top-left high
+  { whiteMix: 0.9, intensity: 1 }, // 1: front-left high
+  { whiteMix: 0.2, intensity: 4 }, // 2: front-right
+  { whiteMix: 0.3, intensity: 1 }, // 3: back-right
+  { whiteMix: 0.1, intensity: 1 }, // 4: front-bottom-right
+  { whiteMix: 0.2, intensity: 0.4 }, // 5: front-bottom-left
+] as const;
+
 type Mat4 = Float32Array;
 type Vec3 = [number, number, number];
 
@@ -93,8 +114,10 @@ export function createEve5Renderer(
   mesh: MeshData,
   options: { thicknessScale?: number; theme?: "light" | "dark"; paddingRadius?: number; bloom?: boolean } = {},
 ) {
-  const studioCubemap = createStudioCubemap(device);
-  renderStudioCubemap(device, studioCubemap);
+  const studioCubemap = createStudioCubemap(device, "eve-5-studio-hdr-cubemap-gray");
+  const coloredStudioCubemap = createStudioCubemap(device, "eve-5-studio-hdr-cubemap-colored");
+  renderStudioCubemap(device, studioCubemap, 0);
+  renderStudioCubemap(device, coloredStudioCubemap, 1);
   const orbitTarget = meshOrbitTarget(mesh);
   const thicknessScale = options.thicknessScale ?? meshThicknessScale(mesh.bounds);
   const isLight = options.theme === "light";
@@ -247,12 +270,12 @@ export function createEve5Renderer(
   });
 
   const gpuMesh = createGpuMesh(device, mesh);
-  const insideParams = createBackParamsBinding(device, backMaterialPipeline, studioCubemap, "eve-5-inside-params");
+  const insideParams = createBackParamsBinding(device, backMaterialPipeline, studioCubemap, coloredStudioCubemap, "eve-5-inside-params");
   const backDepthParams = createUniformParamsBinding(device, backDepthPipeline, "eve-5-back-depth-params");
-  const envBgParams = createEnvParamsBinding(device, envBgPipeline, studioCubemap, "eve-5-env-bg-params");
-  const outsideParams = createParamsBinding(device, frontMaterialPipeline, studioCubemap, "eve-5-outside-params");
-  const opaqueOutsideParams = createParamsBinding(device, opaquePipeline, studioCubemap, "eve-5-opaque-outside-params");
-  const wireParams = createParamsBinding(device, wirePipeline, studioCubemap, "eve-5-wire-params");
+  const envBgParams = createEnvParamsBinding(device, envBgPipeline, studioCubemap, coloredStudioCubemap, "eve-5-env-bg-params");
+  const outsideParams = createParamsBinding(device, frontMaterialPipeline, studioCubemap, coloredStudioCubemap, "eve-5-outside-params");
+  const opaqueOutsideParams = createParamsBinding(device, opaquePipeline, studioCubemap, coloredStudioCubemap, "eve-5-opaque-outside-params");
+  const wireParams = createParamsBinding(device, wirePipeline, studioCubemap, coloredStudioCubemap, "eve-5-wire-params");
   const blurParamsBuffer = device.createBuffer({
     label: "eve-5-bloom-blur-params",
     size: 16,
@@ -316,6 +339,8 @@ export function createEve5Renderer(
     data[31] = MATERIAL_KIND[controls.material];
     data[32] = thicknessScale;
     data[33] = controls.envYaw;
+    // Params.envColorMix is the spare float slot at index 34 (byte offset 136).
+    data[34] = controls.envColorMix ?? 0;
     target.buffer.write(data);
   };
 
@@ -394,6 +419,7 @@ export function createEve5Renderer(
       device,
       frontMaterialPipeline,
       studioCubemap,
+      coloredStudioCubemap,
       outsideParams.buffer,
       backMaterial.createView(),
       backDepth.createView(),
@@ -481,6 +507,7 @@ export function createEve5Renderer(
       device,
       frontDisplayPipeline,
       studioCubemap,
+      coloredStudioCubemap,
       outsideParams.buffer,
       backMaterial.createView(),
       backDepth.createView(),
@@ -618,6 +645,8 @@ export function createEve5Renderer(
       bloomTargets?.vertical.destroy();
       studioCubemap.faceParams.destroy();
       studioCubemap.texture.destroy();
+      coloredStudioCubemap.faceParams.destroy();
+      coloredStudioCubemap.texture.destroy();
     },
   };
 }
@@ -659,9 +688,9 @@ function createBackDepthTexture(device: Device, label: string, width: number, he
   });
 }
 
-export function createStudioCubemap(device: Device): StudioCubemap {
+export function createStudioCubemap(device: Device, label = "eve-5-studio-hdr-cubemap"): StudioCubemap {
   const texture = device.gpu.createTexture({
-    label: "eve-5-studio-hdr-cubemap",
+    label,
     size: { width: CUBE_SIZE, height: CUBE_SIZE, depthOrArrayLayers: CUBE_FACE_COUNT },
     dimension: "2d",
     format: CUBE_FORMAT,
@@ -683,7 +712,7 @@ export function createStudioCubemap(device: Device): StudioCubemap {
   return { texture, view, sampler, faceParams };
 }
 
-export function renderStudioCubemap(device: Device, cubemap: StudioCubemap) {
+export function renderStudioCubemap(device: Device, cubemap: StudioCubemap, mode = 0) {
   const pipeline = createRenderPipeline(device, {
     label: "eve-5-studio-cubemap-bake-pipeline",
     shader: device.createShader(compile(eveCubemapWgsl)),
@@ -699,7 +728,7 @@ export function renderStudioCubemap(device: Device, cubemap: StudioCubemap) {
   });
 
   for (let face = 0; face < CUBE_FACE_COUNT; face += 1) {
-    cubemap.faceParams.write(new Float32Array([face, 0, 0, 0]));
+    cubemap.faceParams.write(cubeParamsData(face, mode));
     const pass = new RenderPass(device, {
       label: `eve-5-studio-cubemap-face-${face}`,
       colorAttachments: [
@@ -718,7 +747,47 @@ export function renderStudioCubemap(device: Device, cubemap: StudioCubemap) {
   }
 }
 
-function createEnvParamsBinding(device: Device, pipeline: GPURenderPipeline, cubemap: StudioCubemap, label: string) {
+function cubeParamsData(face: number, mode: number) {
+  const data = new Float32Array(CUBE_PARAMS_FLOAT_COUNT);
+  data[0] = face;
+  data[1] = mode;
+  const tints = agentSpotTintsLinear();
+  for (let index = 0; index < CUBE_TINT_COUNT; index += 1) {
+    data.set(tints[index]!, 4 + index * 4);
+  }
+  return data;
+}
+
+function agentSpotTintsLinear() {
+  const blue = srgbHexToLinear(EVE_AGENT_BLUE);
+  return EVE_AGENT_SPOT_TINTS.map((spot) => {
+    const [r, g, b] = mixLinearColor(blue, [1, 1, 1], spot.whiteMix);
+    const intensity = spot.intensity * EVE_AGENT_TINT_INTENSITY;
+    return [r * intensity, g * intensity, b * intensity, 0] as const;
+  });
+}
+
+function mixLinearColor(from: Vec3, to: Vec3, amount: number): Vec3 {
+  const safeAmount = Math.max(0, Math.min(1, amount));
+  return [
+    from[0] + (to[0] - from[0]) * safeAmount,
+    from[1] + (to[1] - from[1]) * safeAmount,
+    from[2] + (to[2] - from[2]) * safeAmount,
+  ];
+}
+
+function srgbHexToLinear(hex: string): Vec3 {
+  const normalized = hex.replace(/^#/, "");
+  if (!/^[0-9a-fA-F]{6}$/.test(normalized)) {
+    throw new Error(`Expected a 6-digit sRGB hex color, received ${hex}`);
+  }
+  return [0, 2, 4].map((offset) => {
+    const channel = Number.parseInt(normalized.slice(offset, offset + 2), 16) / 255;
+    return channel <= 0.04045 ? channel / 12.92 : ((channel + 0.055) / 1.055) ** 2.4;
+  }) as Vec3;
+}
+
+function createEnvParamsBinding(device: Device, pipeline: GPURenderPipeline, cubemap: StudioCubemap, coloredCubemap: StudioCubemap, label: string) {
   const buffer = device.createBuffer({ size: PARAMS_BYTE_SIZE, usage: ["uniform", "copy_dst"], label });
   const bindGroup = device.gpu.createBindGroup({
     label: `${label}-bind-group`,
@@ -726,13 +795,14 @@ function createEnvParamsBinding(device: Device, pipeline: GPURenderPipeline, cub
     entries: [
       { binding: 0, resource: { buffer: buffer.gpu } },
       { binding: 1, resource: cubemap.view },
-      { binding: 2, resource: cubemap.sampler },
+      { binding: 2, resource: coloredCubemap.view },
+      { binding: 3, resource: cubemap.sampler },
     ],
   });
   return { buffer, bindGroup };
 }
 
-function createBackParamsBinding(device: Device, pipeline: GPURenderPipeline, cubemap: StudioCubemap, label: string) {
+function createBackParamsBinding(device: Device, pipeline: GPURenderPipeline, cubemap: StudioCubemap, coloredCubemap: StudioCubemap, label: string) {
   const buffer = device.createBuffer({ size: PARAMS_BYTE_SIZE, usage: ["uniform", "copy_dst"], label });
   const bindGroup = device.gpu.createBindGroup({
     label: `${label}-bind-group`,
@@ -740,7 +810,8 @@ function createBackParamsBinding(device: Device, pipeline: GPURenderPipeline, cu
     entries: [
       { binding: 0, resource: { buffer: buffer.gpu } },
       { binding: 1, resource: cubemap.view },
-      { binding: 2, resource: cubemap.sampler },
+      { binding: 2, resource: coloredCubemap.view },
+      { binding: 3, resource: cubemap.sampler },
     ],
   });
   return { buffer, bindGroup };
@@ -760,6 +831,7 @@ function createParamsBinding(
   device: Device,
   pipeline: GPURenderPipeline,
   cubemap: StudioCubemap,
+  coloredCubemap: StudioCubemap,
   label: string,
   backMaterialView?: GPUTextureView,
   backDepthView?: GPUTextureView,
@@ -781,6 +853,7 @@ function createParamsBinding(
     device,
     pipeline,
     cubemap,
+    coloredCubemap,
     buffer,
     backMaterialView ?? fallbackBackMaterial.createView(),
     backDepthView ?? fallbackBackDepth.createView(),
@@ -793,6 +866,7 @@ function createParamsBindGroup(
   device: Device,
   pipeline: GPURenderPipeline,
   cubemap: StudioCubemap,
+  coloredCubemap: StudioCubemap,
   buffer: Buffer,
   backMaterialView: GPUTextureView,
   backDepthView: GPUTextureView,
@@ -804,9 +878,10 @@ function createParamsBindGroup(
     entries: [
       { binding: 0, resource: { buffer: buffer.gpu } },
       { binding: 1, resource: cubemap.view },
-      { binding: 2, resource: cubemap.sampler },
-      { binding: 3, resource: backMaterialView },
-      { binding: 4, resource: backDepthView },
+      { binding: 2, resource: coloredCubemap.view },
+      { binding: 3, resource: cubemap.sampler },
+      { binding: 4, resource: backMaterialView },
+      { binding: 5, resource: backDepthView },
     ],
   });
 }

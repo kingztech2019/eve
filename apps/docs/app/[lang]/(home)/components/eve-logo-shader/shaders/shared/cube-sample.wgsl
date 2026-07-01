@@ -74,6 +74,20 @@ export fn sample_cubemap_array_yaw(envCube: texture_2d_array<f32>, envSampler: s
   return sample_cubemap_array(envCube, envSampler, rotate_y(direction, yaw));
 }
 
+export fn sample_env(
+  grayCube: texture_2d_array<f32>,
+  colorCube: texture_2d_array<f32>,
+  envSampler: sampler,
+  direction: vec3f,
+  yaw: f32,
+  envColorMix: f32,
+) -> vec3f {
+  let rotated = rotate_y(direction, yaw);
+  let gray = sample_cubemap_array(grayCube, envSampler, rotated);
+  let color = sample_cubemap_array(colorCube, envSampler, rotated);
+  return mix(gray, color, clamp(envColorMix, 0.0, 1.0));
+}
+
 export fn sample_cubemap_array_level(envCube: texture_2d_array<f32>, envSampler: sampler, direction: vec3f) -> vec3f {
   let lookup = cube_lookup_uv_face(direction);
   return textureSampleLevel(envCube, envSampler, lookup.xy, i32(lookup.z), 0.0).rgb;

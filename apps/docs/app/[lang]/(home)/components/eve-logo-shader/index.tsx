@@ -7,6 +7,7 @@ import fallbackLightImage from "../../../../../public/eve-5/fallback-light-conte
 import { useEffect, useRef, useState, type ComponentProps, type CSSProperties } from "react";
 import { decodeGltfMesh, meshAspect } from "./mesh";
 import { BLOOM_RADIUS, createEve5Renderer, type RenderControls } from "./render";
+import type { InstallAudience } from "../install-switcher";
 
 class BrowserAdapter implements VGPUAdapter {
   async requestDevice(): Promise<Device> {
@@ -34,12 +35,17 @@ const DEFAULT_CONTROLS: RenderControls = {
   material: "glass",
   wireframe: false,
   showEnv: false,
+  envColorMix: 0,
 };
 const LOGO_RENDER_HEIGHT = 500;
 const MAX_DEVICE_PIXEL_RATIO = 2;
 const FALLBACK_IMAGE_PADDING = BLOOM_RADIUS / MAX_DEVICE_PIXEL_RATIO;
 const MAX_ENV_YAW = 0.45;
 const ENV_YAW_LERP_SPEED = 3;
+const AGENTS_ENV_YAW_OFFSET = -Math.PI * 0.1;
+export const ANIMATE_ENV_COLOR = true;
+export const ENV_COLOR_LERP_SPEED = 6;
+export const AGENTS_ENV_YAW_LERP_SPEED = ENV_COLOR_LERP_SPEED / 2;
 const CANVAS_FADE_FALLBACK_MS = 800;
 const CANVAS_REVEAL_RENDER_COUNT = 3;
 
@@ -91,7 +97,7 @@ function usePrefersReducedMotion() {
   return prefersReducedMotion;
 }
 
-export function EveLogoShader() {
+export function EveLogoShader({ audience = "humans" }: { audience?: InstallAudience }) {
   const theme = useResolvedTheme();
   const prefersReducedMotion = usePrefersReducedMotion();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -99,12 +105,19 @@ export function EveLogoShader() {
   const [logoAspect, setLogoAspect] = useState(DEFAULT_LOGO_ASPECT);
   const [revealed, setRevealed] = useState(false);
   const [showLightFallback, setShowLightFallback] = useState(false);
+  const targetEnvColorMixRef = useRef(audience === "agents" ? 1 : 0);
+
+  useEffect(() => {
+    targetEnvColorMixRef.current = audience === "agents" ? 1 : 0;
+  }, [audience]);
 
   useEffect(() => {
     let cancelled = false;
     let animationFrame = 0;
     let cleanup: (() => void) | undefined;
-    let targetEnvYaw = controlsRef.current.envYaw;
+    let mouseEnvYaw = controlsRef.current.envYaw;
+    let targetMouseEnvYaw = mouseEnvYaw;
+    let agentsEnvYawMix = controlsRef.current.envColorMix ?? 0;
     let previousFrameTime = performance.now();
 
     const canvas = canvasRef.current;
@@ -124,7 +137,7 @@ export function EveLogoShader() {
     const updateEnvYaw = (clientX: number) => {
       const viewportWidth = Math.max(1, window.innerWidth || 1);
       const normalizedX = Math.max(-1, Math.min(1, (clientX / viewportWidth) * 2 - 1));
-      targetEnvYaw = normalizedX * MAX_ENV_YAW;
+      targetMouseEnvYaw = normalizedX * MAX_ENV_YAW;
     };
     const onPointerMove = (event: PointerEvent) => updateEnvYaw(event.clientX);
     window.addEventListener("pointermove", onPointerMove, { passive: true });
@@ -187,7 +200,16 @@ export function EveLogoShader() {
 
         const deltaSeconds = Math.max(0, (frameTime - previousFrameTime) / 1000);
         previousFrameTime = frameTime;
-        controlsRef.current.envYaw = safeLerp(controlsRef.current.envYaw, targetEnvYaw, deltaSeconds * ENV_YAW_LERP_SPEED);
+        mouseEnvYaw = safeLerp(mouseEnvYaw, targetMouseEnvYaw, deltaSeconds * ENV_YAW_LERP_SPEED);
+        const targetEnvColorMix = targetEnvColorMixRef.current;
+        const envColorMix = ANIMATE_ENV_COLOR
+          ? safeLerp(controlsRef.current.envColorMix ?? 0, targetEnvColorMix, deltaSeconds * ENV_COLOR_LERP_SPEED)
+          : targetEnvColorMix;
+        agentsEnvYawMix = ANIMATE_ENV_COLOR
+          ? safeLerp(agentsEnvYawMix, targetEnvColorMix, deltaSeconds * AGENTS_ENV_YAW_LERP_SPEED)
+          : targetEnvColorMix;
+        controlsRef.current.envColorMix = envColorMix;
+        controlsRef.current.envYaw = mouseEnvYaw + agentsEnvYawMix * AGENTS_ENV_YAW_OFFSET;
 
         resizeCanvas(canvas);
         // The renderer pads the logical scene size by BLOOM_RADIUS on each side before allocating

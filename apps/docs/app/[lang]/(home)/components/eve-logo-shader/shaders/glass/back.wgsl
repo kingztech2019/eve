@@ -4,7 +4,8 @@ import { shade_glass } from "../shared/glass-material.wgsl";
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var studioCube: texture_2d_array<f32>;
-@group(0) @binding(2) var studioSampler: sampler;
+@group(0) @binding(2) var coloredStudioCube: texture_2d_array<f32>;
+@group(0) @binding(3) var studioSampler: sampler;
 
 @vertex
 fn vs_main(input: VertexInput) -> VertexOutput {
@@ -38,10 +39,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
       return vec4f(encode_normal(reflected), 1.0);
     }
     case 3u: {
-      return vec4f(env_reflection_from_dir(studioCube, studioSampler, reflected, params.envYaw), 1.0);
+      return vec4f(env_reflection_from_dir(studioCube, coloredStudioCube, studioSampler, reflected, params.envYaw, params.envColorMix), 1.0);
     }
     default: {
-      return shade_glass(studioCube, studioSampler, n, v, reflected, params.envYaw, true);
+      return shade_glass(studioCube, coloredStudioCube, studioSampler, n, v, reflected, params.envYaw, params.envColorMix, true);
     }
   }
 }

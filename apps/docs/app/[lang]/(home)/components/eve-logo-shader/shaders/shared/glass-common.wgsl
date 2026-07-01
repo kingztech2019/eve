@@ -10,6 +10,7 @@ export struct Params {
   materialKind: f32,
   thicknessScale: f32,
   envYaw: f32,
+  envColorMix: f32,
 };
 
 export struct VertexInput {

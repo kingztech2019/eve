@@ -4,9 +4,10 @@ import { shade_glass } from "../shared/glass-material.wgsl";
 
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var studioCube: texture_2d_array<f32>;
-@group(0) @binding(2) var studioSampler: sampler;
-@group(0) @binding(3) var backMaterial: texture_2d<f32>;
-@group(0) @binding(4) var backDepth: texture_2d<f32>;
+@group(0) @binding(2) var coloredStudioCube: texture_2d_array<f32>;
+@group(0) @binding(3) var studioSampler: sampler;
+@group(0) @binding(4) var backMaterial: texture_2d<f32>;
+@group(0) @binding(5) var backDepth: texture_2d<f32>;
 
 const VOGEL_SAMPLE_COUNT = 8u;
 const GOLDEN_ANGLE = 2.399963229728653;
@@ -87,10 +88,10 @@ fn fs_main(input: VertexOutput) -> @location(0) vec4f {
       return vec4f(encode_normal(reflected), 1.0);
     }
     case 3u: {
-      return vec4f(env_reflection_from_dir(studioCube, studioSampler, reflected, params.envYaw), 1.0);
+      return vec4f(env_reflection_from_dir(studioCube, coloredStudioCube, studioSampler, reflected, params.envYaw, params.envColorMix), 1.0);
     }
     default: {
-      var glass = shade_glass(studioCube, studioSampler, n, v, reflected, params.envYaw, false);
+      var glass = shade_glass(studioCube, coloredStudioCube, studioSampler, n, v, reflected, params.envYaw, params.envColorMix, false);
       let backSize = vec2i(textureDimensions(backMaterial));
       let pixel = vec2i(input.clipPosition.xy);
       if (all(pixel >= vec2i(0)) && all(pixel < backSize)) {
